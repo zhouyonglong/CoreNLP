@@ -93,6 +93,7 @@ public class PTBTokenizerTest {
       "the 9-to-11:45 a.m. weekday shift",
       "Brighton Rd. Pacifica",
       "Walls keeping water out of the bowl-shaped city have been breached, and emergency teams are using helicopters to drop 1,350kg (3,000lb) sandbags and concrete barriers into the gaps.",
+          "i got (89.2%) in my exams",
   };
 
   private final String[][] ptbGold = {
@@ -182,6 +183,7 @@ public class PTBTokenizerTest {
       { "Walls", "keeping", "water", "out", "of", "the", "bowl-shaped", "city", "have", "been", "breached", ",", "and",
               "emergency", "teams", "are", "using", "helicopters", "to", "drop", "1,350", "kg", "-LRB-", "3,000", "lb",
               "-RRB-", "sandbags", "and", "concrete", "barriers", "into", "the", "gaps", "." },
+          { "i", "got", "-LRB-", "89.2", "%", "-RRB-", "in", "my", "exams" },
   };
 
   private final String[][] ptbGoldSplitHyphenated = {
@@ -284,12 +286,39 @@ public class PTBTokenizerTest {
       { "Walls", "keeping", "water", "out", "of", "the", "bowl", "-", "shaped", "city", "have", "been", "breached", ",", "and",
               "emergency", "teams", "are", "using", "helicopters", "to", "drop", "1,350", "kg", "-LRB-", "3,000", "lb",
               "-RRB-", "sandbags", "and", "concrete", "barriers", "into", "the", "gaps", "." },
+          { "i", "got", "-LRB-", "89.2", "%", "-RRB-", "in", "my", "exams" },
+
   };
 
   @Test
   public void testPTBTokenizerWord() {
     TokenizerFactory<Word> tokFactory = PTBTokenizer.factory();
     runOnTwoArrays(tokFactory, ptbInputs, ptbGold);
+  }
+
+  private final String[] moreInputs = {
+          "Joseph Someone (fl. 2050–75) liked the noble gases, viz. helium, neon, argon, xenon, krypton and radon.",
+          "Sambucus nigra subsp. canadensis and Canis spp. missing",
+          "Jim Jackon & Co. LLC replied.",
+          "Xanadu Pvt. Ltd. replied.",
+          " \u2010 - ___ ",
+          "whenever one goes 'tisk tisk' at something"
+  };
+
+  private final String[][] moreGold = {
+          { "Joseph", "Someone", "-LRB-", "fl.", "2050", "--", "75", "-RRB-", "liked", "the", "noble", "gases", ",",
+                  "viz.", "helium", ",", "neon", ",", "argon", ",", "xenon", ",", "krypton", "and", "radon", "." },
+          { "Sambucus", "nigra", "subsp.", "canadensis", "and", "Canis", "spp.", "missing" },
+          { "Jim", "Jackon", "&", "Co.", "LLC", "replied", "." },
+          { "Xanadu", "Pvt.", "Ltd.", "replied", "." },
+          { "\u2010", "-", "___" },
+          { "whenever", "one", "goes", "`", "tisk", "tisk", "'", "at", "something" },
+  };
+
+  @Test
+  public void testPTBTokenizerCoreLabel() {
+    TokenizerFactory<CoreLabel> tokFactory = PTBTokenizer.coreLabelFactory();
+    runOnTwoArrays(tokFactory, moreInputs, moreGold);
   }
 
 
@@ -307,6 +336,8 @@ public class PTBTokenizerTest {
 
   @Test
   public void testCorp() {
+    assertEquals(2, corpInputs.length);
+    assertEquals(2, corpGold.length);
     // We test a 2x2 design: {strict, regular} x {no following context, following context}
     for (int sent = 0; sent < 4; sent++) {
       PTBTokenizer<CoreLabel> ptbTokenizer = new PTBTokenizer<>(new StringReader(corpInputs[sent / 2]),
@@ -337,19 +368,29 @@ public class PTBTokenizerTest {
   }
 
 
+  private static final String[] jeInputs = {
+          "it's",
+          " it's ",
+          // "open images/cat.png", // Dunno how to get this case without bad consequence. Can't detect eof in pattern....
+  };
+
+  private static final List[] jeOutputs = {
+          Arrays.asList(new Word("it"), new Word("'s")),
+          Arrays.asList(new Word("it"), new Word("'s")),
+          // Arrays.asList(new Word("open"), new Word("images/cat.png")),
+  };
+
+
+  /** These case check things still work at end of file that would normally have following contexts. */
   @Test
   public void testJacobEisensteinApostropheCase() {
-    StringReader reader = new StringReader("it's");
-    PTBTokenizer<Word> tokenizer = PTBTokenizer.newPTBTokenizer(reader);
-    List<Word> stemmedTokens = tokenizer.tokenize();
-    // for (Word word : stemmedTokens) System.out.print (word+" ");
-    reader = new StringReader(" it's ");
-    tokenizer = PTBTokenizer.newPTBTokenizer(reader);
-    List<Word> stemmedTokens2 = tokenizer.tokenize();
-    // System.out.println ();
-    // for (Word word : stemmedTokens2) System.out.print (word+" ");
-    // System.out.println();
-    assertEquals(stemmedTokens, stemmedTokens2);
+    assertEquals(jeInputs.length, jeOutputs.length);
+    for (int i = 0; i < jeInputs.length; i++) {
+      StringReader reader = new StringReader(jeInputs[i]);
+      PTBTokenizer<Word> tokenizer = PTBTokenizer.newPTBTokenizer(reader);
+      List<Word> tokens = tokenizer.tokenize();
+      assertEquals(jeOutputs[i], tokens);
+    }
   }
 
 

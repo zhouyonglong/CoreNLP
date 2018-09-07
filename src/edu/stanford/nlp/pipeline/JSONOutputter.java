@@ -76,8 +76,8 @@ public class JSONOutputter extends AnnotationOutputter {
           l2.set("line", sentence.get(CoreAnnotations.LineNumberAnnotation.class));
           // (constituency tree)
           StringWriter treeStrWriter = new StringWriter();
-          TreePrint treePrinter = options.constituentTreePrinter;
-          if (treePrinter == AnnotationOutputter.DEFAULT_CONSTITUENT_TREE_PRINTER) {
+          TreePrint treePrinter = options.constituencyTreePrinter;
+          if (treePrinter == AnnotationOutputter.DEFAULT_CONSTITUENCY_TREE_PRINTER) {
             // note the '==' -- we're overwriting the default, but only if it was not explicitly set otherwise
             treePrinter = new TreePrint("oneline");
           }
@@ -226,6 +226,10 @@ public class JSONOutputter extends AnnotationOutputter {
               quote.get(QuoteAttributionAnnotator.SpeakerAnnotation.class) != null ?
                   quote.get(QuoteAttributionAnnotator.SpeakerAnnotation.class) :
                   "Unknown");
+          l2.set("canonicalSpeaker",
+              quote.get(QuoteAttributionAnnotator.CanonicalMentionAnnotation.class) != null ?
+                  quote.get(QuoteAttributionAnnotator.CanonicalMentionAnnotation.class) :
+                  "Unknown");
 
         }));
       }
@@ -256,6 +260,7 @@ public class JSONOutputter extends AnnotationOutputter {
       }
     });
 
+    l0.newline();
     l0.flush();  // flush
   }
 

@@ -61,7 +61,7 @@ public class CRFClassifierFloat<IN extends CoreMap> extends CRFClassifier<IN>  {
   @Override
   protected double[] trainWeights(int[][][][] data, int[][] labels, Evaluator[] evaluators, int pruneFeatureItr, double[][][][] featureVals) {
     CRFLogConditionalObjectiveFloatFunction func = new CRFLogConditionalObjectiveFloatFunction(data, labels,
-        featureIndex, windowSize, classIndex, labelIndices, map, flags.backgroundSymbol, flags.sigma);
+        windowSize, classIndex, labelIndices, map, flags.backgroundSymbol, flags.sigma);
     cliquePotentialFunctionHelper = func;
 
     QNMinimizer minimizer;
@@ -84,10 +84,10 @@ public class CRFClassifierFloat<IN extends CoreMap> extends CRFClassifier<IN>  {
     } else {
       try {
         log.info("Reading initial weights from file " + flags.initialWeights);
-        DataInputStream dis = new DataInputStream(new BufferedInputStream(new GZIPInputStream(new FileInputStream(
-            flags.initialWeights))));
-        initialWeights = ConvertByteArray.readFloatArr(dis);
-        dis.close();
+        try (DataInputStream dis = new DataInputStream(new BufferedInputStream(new GZIPInputStream(new FileInputStream(
+            flags.initialWeights))))) {
+          initialWeights = ConvertByteArray.readFloatArr(dis);
+        }
       } catch (IOException e) {
         throw new RuntimeException("Could not read from float initial weight file " + flags.initialWeights);
       }

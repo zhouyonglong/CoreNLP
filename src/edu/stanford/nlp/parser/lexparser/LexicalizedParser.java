@@ -538,9 +538,8 @@ public class LexicalizedParser extends ParserGrammar implements Serializable  {
   }
 
   protected static LexicalizedParser getParserFromTextFile(String textFileOrUrl, Options op) {
-    try {
+    try (BufferedReader in = IOUtils.readerFromString(textFileOrUrl)) {
       Timing tim = new Timing();
-      BufferedReader in = IOUtils.readerFromString(textFileOrUrl);
       Timing.startTime();
 
       String line = in.readLine();
@@ -584,7 +583,6 @@ public class LexicalizedParser extends ParserGrammar implements Serializable  {
       DependencyGrammar dg = new MLEDependencyGrammar(op.tlpParams, op.directional, op.distance, op.coarseDistance, op.trainOptions.basicCategoryTagsInDependencyGrammar, op, wordIndex, tagIndex);
       dg.readData(in);
 
-      in.close();
       log.info("Loading parser from text file " + textFileOrUrl + " ... done [" + tim.toSecondsString() + " sec].");
       return new LexicalizedParser(lex, bg, ug, dg, stateIndex, wordIndex, tagIndex, op);
     } catch (IOException e) {
@@ -612,8 +610,11 @@ public class LexicalizedParser extends ParserGrammar implements Serializable  {
     } catch (StreamCorruptedException sce) {
       // suppress error message, on the assumption that we've really got
       // a text grammar, and that'll be tried next
+      log.info("Attempting to load " + serializedFileOrUrl +
+               " as a serialized grammar caused error below, but this may just be because it's a text grammar!");
+      log.info(sce);
     } catch (Exception e) {
-      e.printStackTrace();
+      log.error(e);
     }
     return null;
   }
@@ -1074,7 +1075,8 @@ public class LexicalizedParser extends ParserGrammar implements Serializable  {
    * {@code -escaper}, the tokens <i>must</i> all be correctly
    * tokenized tokens of the appropriate treebank for the parser to work
    * well (for instance, if using the Penn English Treebank, you must have
-   * coded "(" as "-LRB-", "3/4" as "3\/4", etc.)</LI>
+   * coded "(" as "-LRB-", etc.). (Note: we do not use the backslash escaping
+   * in front of / and * that appeared in Penn Treebank releases through 1999.)</li>
    * <li>{@code -escaper class} Specify a class of type
    * {@link Function}&lt;List&lt;HasWord&gt;,List&lt;HasWord&gt;&gt; to do
    * customized escaping of tokenized text.  This class will be run over the

@@ -24,11 +24,7 @@ import javax.net.ssl.*;
 import java.io.*;
 import java.lang.ref.SoftReference;
 import java.math.BigInteger;
-import java.net.InetAddress;
-import java.net.InetSocketAddress;
-import java.net.URI;
-import java.net.URL;
-import java.net.URLDecoder;
+import java.net.*;
 import java.nio.ByteBuffer;
 import java.nio.charset.Charset;
 import java.security.*;
@@ -61,11 +57,13 @@ public class StanfordCoreNLPServer implements Runnable {
   protected int serverPort = 9000;
   @ArgumentParser.Option(name="status_port", gloss="The port to serve the status check endpoints on. If different from the server port, this will run in a separate thread.")
   protected int statusPort = serverPort;
+  @ArgumentParser.Option(name="uriContext", gloss="The URI context")
+  protected String uriContext = "";
   @ArgumentParser.Option(name="timeout", gloss="The default timeout, in milliseconds")
   protected int timeoutMilliseconds = 15000;
   @ArgumentParser.Option(name="strict", gloss="If true, obey strict HTTP standards (e.g., with encoding)")
   protected boolean strict = false;
-  @ArgumentParser.Option(name="quiet", gloss="If true, don't print to stdout")
+  @ArgumentParser.Option(name="quiet", gloss="If true, don't print to stdout and don't log every API POST")
   protected boolean quiet = false;
   @ArgumentParser.Option(name="ssl", gloss="If true, start the server with an [insecure!] SSL connection")
   protected boolean ssl = false;
@@ -76,13 +74,18 @@ public class StanfordCoreNLPServer implements Runnable {
   @ArgumentParser.Option(name="password", gloss="The password component of a username/password basic auth credential")
   protected String password = null;
   @ArgumentParser.Option(name="annotators", gloss="The default annotators to run over a given sentence.")
-  protected static String defaultAnnotators = "tokenize,ssplit,pos,lemma,ner,parse,depparse,mention,coref,natlog,openie,regexner,kbp";
+  protected static String defaultAnnotators = "tokenize,ssplit,pos,lemma,ner,parse,depparse,coref,natlog,openie,kbp";
   @ArgumentParser.Option(name="preload", gloss="Cache the following annotators on startup")
   protected static String preloadedAnnotators = "";
   @ArgumentParser.Option(name="serverProperties", gloss="Default properties file for server's StanfordCoreNLP instance")
   protected static String serverPropertiesPath = null;
   @ArgumentParser.Option(name="maxCharLength", gloss="Max length string that will be processed (non-positive means no limit)")
   protected static int maxCharLength = 100000;
+  @ArgumentParser.Option(name="blacklist", gloss="A file containing subnets that should be blacklisted from accessing the server. Each line is a subnet. They are specified as an IPv4 address followed by a slash followed by how many leading bits to maintain as the subnet mask. E.g., '54.240.225.0/24'.")
+  protected static String blacklist = null;
+  @ArgumentParser.Option(name="stanford", gloss="If true, do special options (blacklist, timeout modifications) for public Stanford server")
+  protected boolean stanford = false;
+
 
 
   protected final String shutdownKey;
@@ -104,6 +107,12 @@ public class StanfordCoreNLPServer implements Runnable {
    * An executor to time out CoreNLP execution with.
    */
   private final ExecutorService corenlpExecutor;
+
+
+  /**
+   * A list of blacklisted subnets -- these cannot call the server.
+   */
+  private final List<Pair<Inet4Address, Integer>> blacklistSubnets;
 
 
   /**
@@ -171,7 +180,7 @@ public class StanfordCoreNLPServer implements Runnable {
     }
     this.defaultProps = PropertiesUtils.asProperties(
         "annotators", defaultAnnotators,  // Run these annotators by default
-        "mention.type", "dep",  // Use dependency trees with coref by default
+        "coref.mention.type", "dep",  // Use dependency trees with coref by default
         "coref.mode", "statistical",  // Use the new coref
         "coref.language", "en",  // We're English by default
         "inputFormat", "text",   // By default, treat the POST data like text
@@ -194,10 +203,11 @@ public class StanfordCoreNLPServer implements Runnable {
     // Generate and write a shutdown key, get optional server_id from passed in properties
     // this way if multiple servers running can shut them all down with different ids
     String shutdownKeyFileName;
-    if (props != null && props.getProperty("server_id") != null)
-      shutdownKeyFileName = "corenlp.shutdown."+props.getProperty("server_id");
-    else
+    if (props != null && props.getProperty("server_id") != null) {
+      shutdownKeyFileName = "corenlp.shutdown." + props.getProperty("server_id");
+    } else {
       shutdownKeyFileName = "corenlp.shutdown";
+    }
     String tmpDir = System.getProperty("java.io.tmpdir");
     File tmpFile = new File(tmpDir + File.separator + shutdownKeyFileName);
     tmpFile.deleteOnExit();
@@ -213,6 +223,19 @@ public class StanfordCoreNLPServer implements Runnable {
       this.statusPort = Integer.parseInt(props.getProperty("status_port"));
     } else if (props != null && props.containsKey("port")) {
       this.statusPort = Integer.parseInt(props.getProperty("port"));
+    }
+    // parse blacklist
+    if (blacklist == null) {
+      this.blacklistSubnets = Collections.emptyList();
+    } else {
+      this.blacklistSubnets = new ArrayList<>();
+      for (String subnet : IOUtils.readLines(blacklist)) {
+        try {
+          this.blacklistSubnets.add(parseSubnet(subnet));
+        } catch (IllegalArgumentException e) {
+          warn("Could not parse subnet: " + subnet);
+        }
+      }
     }
   }
 
@@ -331,13 +354,14 @@ public class StanfordCoreNLPServer implements Runnable {
         return lastPipeline.second;
       } else {
         // Do some housekeeping on the global cache
-        for (Map.Entry<StanfordCoreNLP.AnnotatorSignature, Lazy<Annotator>> entry : new HashSet<>(StanfordCoreNLP.GLOBAL_ANNOTATOR_CACHE.entrySet())) {
-          if (!entry.getValue().isCache()) {
+        for (Iterator<Map.Entry<StanfordCoreNLP.AnnotatorSignature, Lazy<Annotator>>> iter = StanfordCoreNLP.GLOBAL_ANNOTATOR_CACHE.entrySet().iterator();
+             iter.hasNext(); ) {
+          Map.Entry<StanfordCoreNLP.AnnotatorSignature, Lazy<Annotator>> entry = iter.next();
+          if ( ! entry.getValue().isCache()) {
             error("Entry in global cache is not garbage collectable!");
-            StanfordCoreNLP.GLOBAL_ANNOTATOR_CACHE.remove(entry.getKey());
-          }
-          if (entry.getValue().isCache() && entry.getValue().isGarbageCollected()) {
-            StanfordCoreNLP.GLOBAL_ANNOTATOR_CACHE.remove(entry.getKey());
+            iter.remove();
+          } else if (entry.getValue().isGarbageCollected()) {
+            iter.remove();
           }
         }
         // Create a CoreNLP
@@ -386,10 +410,9 @@ public class StanfordCoreNLPServer implements Runnable {
     if (language != null && !"default".equals(language)) {
       String languagePropertiesFile = LanguageInfo.getLanguagePropertiesFile(language);
       if (languagePropertiesFile != null) {
-        try {
+        try (InputStream is = IOUtils.getInputStreamFromURLOrClasspathOrFileSystem(languagePropertiesFile)){
           Properties languageSpecificProperties = new Properties();
-          languageSpecificProperties.load(
-                  IOUtils.getInputStreamFromURLOrClasspathOrFileSystem(languagePropertiesFile));
+          languageSpecificProperties.load(is);
           PropertiesUtils.overWriteProperties(props,languageSpecificProperties);
         } catch (IOException e) {
           err("Failure to load language specific properties: " + languagePropertiesFile + " for " + language);
@@ -471,6 +494,7 @@ public class StanfordCoreNLPServer implements Runnable {
    * @throws IOException Thrown if the HttpExchange cannot communicate the error.
    */
   private static void respondUnauthorized(HttpExchange httpExchange) throws IOException {
+    log("Responding unauthorized to " + httpExchange.getRemoteAddress());
     httpExchange.getResponseHeaders().add("Content-type", "application/javascript");
     byte[] content = "{\"message\": \"Unauthorized API request\"}".getBytes("utf-8");
     httpExchange.sendResponseHeaders(HTTP_UNAUTHORIZED, content.length);
@@ -486,6 +510,78 @@ public class StanfordCoreNLPServer implements Runnable {
     httpExchange.getResponseHeaders().add("Access-Control-Allow-Credentials", "true");
     httpExchange.getResponseHeaders().add("Access-Control-Allow-Credentials-Header", "*");
   }
+
+
+  /**
+   * Adapted from: https://stackoverflow.com/questions/4209760/validate-an-ip-address-with-mask
+   */
+  private static Pair<Inet4Address, Integer> parseSubnet(String subnet) {
+    String[] parts = subnet.split("/");
+    String ip = parts[0];
+    int prefix;
+
+    if (parts.length < 2) {
+      prefix = 0;
+    } else {
+      prefix = Integer.parseInt(parts[1]);
+    }
+    try {
+      return Pair.makePair((Inet4Address) InetAddress.getByName(ip), prefix);
+    } catch (UnknownHostException e) {
+      throw new IllegalArgumentException("Invalid subnet: " + subnet);
+    }
+  }
+
+
+  /**
+   * Adapted from: https://stackoverflow.com/questions/4209760/validate-an-ip-address-with-mask
+   */
+  @SuppressWarnings("PointlessBitwiseExpression")
+  private static boolean netMatch(Pair<Inet4Address, Integer> subnet, Inet4Address addr ){
+    byte[] b = subnet.first.getAddress();
+    int ipInt = ((b[0] & 0xFF) << 24) |
+        ((b[1] & 0xFF) << 16) |
+        ((b[2] & 0xFF) << 8)  |
+        ((b[3] & 0xFF) << 0);
+    byte[] b1 = addr.getAddress();
+    int ipInt1 = ((b1[0] & 0xFF) << 24) |
+        ((b1[1] & 0xFF) << 16) |
+        ((b1[2] & 0xFF) << 8)  |
+        ((b1[3] & 0xFF) << 0);
+    int mask = ~((1 << (32 - subnet.second)) - 1);
+    return (ipInt & mask) == (ipInt1 & mask);
+  }
+
+  /**
+   * Check that the given address is not in the subnet
+   *
+   * @param addr The address to check.
+   *
+   * @return True if the address is <b>not</b> in any blacklisted subnet. That is, we can accept connections from it.
+   */
+  private boolean onBlacklist(Inet4Address addr) {
+    for (Pair<Inet4Address, Integer> subnet : blacklistSubnets) {
+      if (netMatch(subnet, addr)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** @see #onBlacklist(Inet4Address) */
+  private boolean onBlacklist(HttpExchange exchange) {
+    if ( ! stanford) {
+      return false;
+    }
+    InetAddress addr = exchange.getRemoteAddress().getAddress();
+    if (addr instanceof Inet4Address) {
+      return onBlacklist((Inet4Address) addr);
+    } else {
+      log("Not checking IPv6 address against blacklist: " + addr);
+      return false;  // TODO(gabor) we should eventually check ipv6 addresses too
+    }
+  }
+
 
   /**
    * A callback object that lets us hook into the result of an annotation request.
@@ -618,7 +714,9 @@ public class StanfordCoreNLPServer implements Runnable {
       this(fileOrClasspath, "text/html");
     }
     public FileHandler(String fileOrClasspath, String contentType) throws IOException {
-      this.content = IOUtils.slurpReader(IOUtils.readerFromString(fileOrClasspath, "utf-8"));
+      try (BufferedReader r = IOUtils.readerFromString(fileOrClasspath, "utf-8")) {
+        this.content = IOUtils.slurpReader(r);
+      }
       this.contentType = contentType + "; charset=utf-8";  // always encode in utf-8
     }
     @Override
@@ -632,6 +730,7 @@ public class StanfordCoreNLPServer implements Runnable {
       httpExchange.close();
     }
   } // end static class FileHandler
+
 
   /**
    * The main handler for taking an annotation request, and annotating it.
@@ -700,6 +799,10 @@ public class StanfordCoreNLPServer implements Runnable {
 
     @Override
     public void handle(HttpExchange httpExchange) throws IOException {
+      if (onBlacklist(httpExchange)) {
+        respondUnauthorized(httpExchange);
+        return;
+      }
       setHttpExchangeResponseHeaders(httpExchange);
 
       // Get sentence.
@@ -726,11 +829,13 @@ public class StanfordCoreNLPServer implements Runnable {
             respondUnauthorized(httpExchange);
             return;
           }
-          log("[" + httpExchange.getRemoteAddress() + "] API call w/annotators " + props.getProperty("annotators", "<unknown>"));
+          if ( ! quiet) {
+            log("[" + httpExchange.getRemoteAddress() + "] API call w/annotators " + props.getProperty("annotators", "<unknown>"));
+          }
           ann = getDocument(props, httpExchange);
           of = StanfordCoreNLP.OutputFormat.valueOf(props.getProperty("outputFormat", "json").toUpperCase());
           String text = ann.get(CoreAnnotations.TextAnnotation.class).replace('\n', ' ');
-          if (!quiet) {
+          if ( ! quiet) {
             System.out.println(text);
           }
           if (maxCharLength > 0 && text.length() > maxCharLength) {
@@ -753,29 +858,21 @@ public class StanfordCoreNLPServer implements Runnable {
           return ann;
         });
         Annotation completedAnnotation;
+        int timeoutMilliseconds;
         try {
-          int timeoutMilliseconds = Integer.parseInt(props.getProperty("timeout",
-                                                     Integer.toString(StanfordCoreNLPServer.this.timeoutMilliseconds)));
-          // Check for too long a timeout from an unauthorized source
-          if (timeoutMilliseconds > 15000) {
-            // If two conditions:
-            //   (1) The server is running on corenlp.run (i.e., corenlp.stanford.edu)
-            //   (2) The request is not coming from a *.stanford.edu" email address
-            // Then force the timeout to be 15 seconds
-            if ("corenlp.stanford.edu".equals(InetAddress.getLocalHost().getHostName()) &&
-                !httpExchange.getRemoteAddress().getHostName().toLowerCase().endsWith("stanford.edu")) {
-              timeoutMilliseconds = 15000;
-            }
-          }
-          completedAnnotation = completedAnnotationFuture.get(timeoutMilliseconds, TimeUnit.MILLISECONDS);
+          timeoutMilliseconds = Integer.parseInt(props.getProperty("timeout",
+                                                 Integer.toString(StanfordCoreNLPServer.this.timeoutMilliseconds)));
+          timeoutMilliseconds = maybeAlterStanfordTimeout(httpExchange, timeoutMilliseconds);
+
         } catch (NumberFormatException e) {
-          completedAnnotation = completedAnnotationFuture.get(StanfordCoreNLPServer.this.timeoutMilliseconds, TimeUnit.MILLISECONDS);
+          timeoutMilliseconds = StanfordCoreNLPServer.this.timeoutMilliseconds;
         }
+        completedAnnotation = completedAnnotationFuture.get(timeoutMilliseconds, TimeUnit.MILLISECONDS);
         completedAnnotationFuture = null;  // No longer any need for the future
 
         // Get output
         ByteArrayOutputStream os = new ByteArrayOutputStream();
-        AnnotationOutputter.Options options = AnnotationOutputter.getOptions(pipeline);
+        AnnotationOutputter.Options options = AnnotationOutputter.getOptions(pipeline.getProperties());
         StanfordCoreNLP.createOutputter(props, options).accept(completedAnnotation, os);
         os.close();
         byte[] response = os.toByteArray();
@@ -814,6 +911,29 @@ public class StanfordCoreNLPServer implements Runnable {
         }
       }
     }
+
+    private int maybeAlterStanfordTimeout(HttpExchange httpExchange, int timeoutMilliseconds) {
+      if ( ! stanford) {
+        return timeoutMilliseconds;
+      }
+      try {
+        // Check for too long a timeout from an unauthorized source
+        if (timeoutMilliseconds > 15000) {
+          // If two conditions:
+          //   (1) The server is running on corenlp.run (i.e., corenlp.stanford.edu)
+          //   (2) The request is not coming from a *.stanford.edu" email address
+          // Then force the timeout to be 15 seconds
+          if ("corenlp.stanford.edu".equals(InetAddress.getLocalHost().getHostName()) &&
+                  ! httpExchange.getRemoteAddress().getHostName().toLowerCase().endsWith("stanford.edu")) {
+            timeoutMilliseconds = 15000;
+          }
+        }
+        return timeoutMilliseconds;
+      } catch (UnknownHostException uhe) {
+        return timeoutMilliseconds;
+      }
+    }
+
   } // end class CoreNLPHandler
 
 
@@ -844,6 +964,10 @@ public class StanfordCoreNLPServer implements Runnable {
 
     @Override
     public void handle(HttpExchange httpExchange) throws IOException {
+      if (onBlacklist(httpExchange)) {
+        respondUnauthorized(httpExchange);
+        return;
+      }
       setHttpExchangeResponseHeaders(httpExchange);
 
       Properties props = getProperties(httpExchange);
@@ -965,7 +1089,10 @@ public class StanfordCoreNLPServer implements Runnable {
 
     @Override
     public void handle(HttpExchange httpExchange) throws IOException {
-
+      if (onBlacklist(httpExchange)) {
+        respondUnauthorized(httpExchange);
+        return;
+      }
       setHttpExchangeResponseHeaders(httpExchange);
 
       Properties props = getProperties(httpExchange);
@@ -1087,7 +1214,10 @@ public class StanfordCoreNLPServer implements Runnable {
 
     @Override
     public void handle(HttpExchange httpExchange) throws IOException {
-
+      if (onBlacklist(httpExchange)) {
+        respondUnauthorized(httpExchange);
+        return;
+      }
       setHttpExchangeResponseHeaders(httpExchange);
 
       Properties props = getProperties(httpExchange);
@@ -1176,10 +1306,10 @@ public class StanfordCoreNLPServer implements Runnable {
 
   private static HttpsServer addSSLContext(HttpsServer server) {
     log("Adding SSL context to server; key=" + StanfordCoreNLPServer.key);
-    try {
+    try (InputStream is = IOUtils.getInputStreamFromURLOrClasspathOrFileSystem(key)) {
       KeyStore ks = KeyStore.getInstance("JKS");
       if (StanfordCoreNLPServer.key != null && IOUtils.existsInClasspathOrFileSystem(StanfordCoreNLPServer.key)) {
-        ks.load(IOUtils.getInputStreamFromURLOrClasspathOrFileSystem(key), "corenlp".toCharArray());
+        ks.load(is, "corenlp".toCharArray());
       } else {
         throw new IllegalArgumentException("Could not find SSL keystore at " + StanfordCoreNLPServer.key);
       }
@@ -1296,18 +1426,22 @@ public class StanfordCoreNLPServer implements Runnable {
       } else {
         server = HttpServer.create(new InetSocketAddress(serverPort), 0); // 0 is the default 'backlog'
       }
-      withAuth(server.createContext("/", new CoreNLPHandler(defaultProps, authenticator, callback, homepage)), basicAuth);
-      withAuth(server.createContext("/tokensregex", new TokensRegexHandler(authenticator, callback)), basicAuth);
-      withAuth(server.createContext("/semgrex", new SemgrexHandler(authenticator, callback)), basicAuth);
-      withAuth(server.createContext("/tregex", new TregexHandler(authenticator, callback)), basicAuth);
-      withAuth(server.createContext("/corenlp-brat.js", new FileHandler("edu/stanford/nlp/pipeline/demo/corenlp-brat.js", "application/javascript")), basicAuth);
-      withAuth(server.createContext("/corenlp-brat.cs", new FileHandler("edu/stanford/nlp/pipeline/demo/corenlp-brat.css", "text/css")), basicAuth);
-      withAuth(server.createContext("/corenlp-parseviewer.js", new FileHandler("edu/stanford/nlp/pipeline/demo/corenlp-parseviewer.js", "application/javascript")), basicAuth);
-      withAuth(server.createContext("/ping", new PingHandler()), Optional.empty());
-      withAuth(server.createContext("/shutdown", new ShutdownHandler()), basicAuth);
+      String contextRoot = uriContext;
+      if (contextRoot.isEmpty()) {
+        contextRoot = "/";
+      }
+      withAuth(server.createContext(contextRoot, new CoreNLPHandler(defaultProps, authenticator, callback, homepage)), basicAuth);
+      withAuth(server.createContext(uriContext+"/tokensregex", new TokensRegexHandler(authenticator, callback)), basicAuth);
+      withAuth(server.createContext(uriContext+"/semgrex", new SemgrexHandler(authenticator, callback)), basicAuth);
+      withAuth(server.createContext(uriContext+"/tregex", new TregexHandler(authenticator, callback)), basicAuth);
+      withAuth(server.createContext(uriContext+"/corenlp-brat.js", new FileHandler("edu/stanford/nlp/pipeline/demo/corenlp-brat.js", "application/javascript")), basicAuth);
+      withAuth(server.createContext(uriContext+"/corenlp-brat.cs", new FileHandler("edu/stanford/nlp/pipeline/demo/corenlp-brat.css", "text/css")), basicAuth);
+      withAuth(server.createContext(uriContext+"/corenlp-parseviewer.js", new FileHandler("edu/stanford/nlp/pipeline/demo/corenlp-parseviewer.js", "application/javascript")), basicAuth);
+      withAuth(server.createContext(uriContext+"/ping", new PingHandler()), Optional.empty());
+      withAuth(server.createContext(uriContext+"/shutdown", new ShutdownHandler()), basicAuth);
       if (this.serverPort == this.statusPort) {
-        withAuth(server.createContext("/live", new LiveHandler()), Optional.empty());
-        withAuth(server.createContext("/ready", new ReadyHandler(live)), Optional.empty());
+        withAuth(server.createContext(uriContext+"/live", new LiveHandler()), Optional.empty());
+        withAuth(server.createContext(uriContext+"/ready", new ReadyHandler(live)), Optional.empty());
 
       }
       server.setExecutor(serverExecutor);

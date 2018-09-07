@@ -3,6 +3,8 @@ package edu.stanford.nlp.pipeline;
 import java.util.*;
 import java.util.function.Predicate;
 
+import edu.stanford.nlp.coref.data.WordLists;
+import edu.stanford.nlp.ie.KBPRelationExtractor;
 import edu.stanford.nlp.ling.CoreAnnotation;
 import edu.stanford.nlp.ling.CoreAnnotations;
 import edu.stanford.nlp.ling.CoreLabel;
@@ -10,8 +12,6 @@ import edu.stanford.nlp.time.TimeAnnotations;
 import edu.stanford.nlp.time.Timex;
 import edu.stanford.nlp.util.*;
 import edu.stanford.nlp.util.logging.Redwood;
-
-import static edu.stanford.nlp.util.logging.Redwood.Util.logf;
 
 
 /**
@@ -44,6 +44,8 @@ public class EntityMentionsAnnotator implements Annotator {
    * This is super useful (+20% recall) for KBP.
    */
   private final boolean doAcronyms;
+
+  private LanguageInfo.HumanLanguage entityMentionsLanguage;
 
   // TODO: Provide properties
   public static PropertiesUtils.Property[] SUPPORTED_PROPERTIES = new PropertiesUtils.Property[]{};
@@ -90,25 +92,11 @@ public class EntityMentionsAnnotator implements Annotator {
     }
     chunkIdentifier = new LabeledChunkIdentifier();
     doAcronyms = Boolean.parseBoolean(props.getProperty(name + ".acronyms", props.getProperty("acronyms", "false")));
+    // set up language info, this is needed for handling creating pronominal mentions
+    entityMentionsLanguage = LanguageInfo.getLanguageFromString(props.getProperty(name+".language", "en"));
   }
 
-  private static boolean checkStrings(String s1, String s2) {
-    if (s1 == null || s2 == null) {
-      return Objects.equals(s1, s2);
-    } else {
-      return s1.equals(s2);
-    }
-  }
-
-  private static boolean checkNumbers(Number n1, Number n2) {
-    if (n1 == null || n2 == null) {
-      return Objects.equals(n1, n2);
-    } else {
-      return n1.equals(n2);
-    }
-  }
-
-  private List<CoreLabel> tokensForCharacters(List<CoreLabel> tokens, int charBegin, int charEnd) {
+  private static List<CoreLabel> tokensForCharacters(List<CoreLabel> tokens, int charBegin, int charEnd) {
     assert charBegin >= 0;
     List<CoreLabel> segment = Generics.newArrayList();
     for(CoreLabel token: tokens) {
@@ -133,7 +121,7 @@ public class EntityMentionsAnnotator implements Annotator {
     // Get NormalizedNamedEntityTag and say two entities are incompatible if they are different
     String v1 = cur.get(nerNormalizedCoreAnnotationClass);
     String v2 = prev.get(nerNormalizedCoreAnnotationClass);
-    if ( ! checkStrings(v1,v2)) return false;
+    if ( ! Objects.equals(v1, v2)) return false;
 
     // This duplicates logic in the QuantifiableEntityNormalizer (but maybe we will get rid of that class)
     String nerTag = cur.get(nerCoreAnnotationClass);
@@ -141,7 +129,7 @@ public class EntityMentionsAnnotator implements Annotator {
       // Get NumericCompositeValueAnnotation and say two entities are incompatible if they are different
       Number n1 = cur.get(CoreAnnotations.NumericCompositeValueAnnotation.class);
       Number n2 = prev.get(CoreAnnotations.NumericCompositeValueAnnotation.class);
-      if ( ! checkNumbers(n1,n2)) return false;
+      if ( ! Objects.equals(n1, n2)) return false;
     }
 
     // Check timex...
@@ -150,7 +138,7 @@ public class EntityMentionsAnnotator implements Annotator {
       Timex timex2 = prev.get(TimeAnnotations.TimexAnnotation.class);
       String tid1 = (timex1 != null)? timex1.tid():null;
       String tid2 = (timex2 != null)? timex2.tid():null;
-      if ( ! checkStrings(tid1,tid2)) return false;
+      if ( ! Objects.equals(tid1, tid2)) return false;
     }
 
     return true;
@@ -170,9 +158,67 @@ public class EntityMentionsAnnotator implements Annotator {
     }).findFirst());
   }
 
+  /**
+   * Returns whether the given token counts as a valid pronominal mention for KBP.
+   * This method (at present) works for either Chinese or English.
+   *
+   * @param word The token to classify.
+   * @return true if this token is a pronoun that KBP should recognize.
+   */
+  private static boolean kbpIsPronominalMention(CoreLabel word) {
+    return WordLists.isKbpPronominalMention(word.word());
+  }
+
+  /**
+   * Annotate all the pronominal mentions in the document.
+   * @param ann The document.
+   * @return The list of pronominal mentions in the document.
+   */
+  private static List<CoreMap> annotatePronominalMentions(Annotation ann) {
+    List<CoreMap> pronouns = new ArrayList<>();
+    List<CoreMap> sentences = ann.get(CoreAnnotations.SentencesAnnotation.class);
+    for (int sentenceIndex = 0; sentenceIndex < sentences.size(); sentenceIndex++) {
+      CoreMap sentence = sentences.get(sentenceIndex);
+      Integer annoTokenBegin = sentence.get(CoreAnnotations.TokenBeginAnnotation.class);
+      if (annoTokenBegin == null) {
+        annoTokenBegin = 0;
+      }
+
+      List<CoreLabel> tokens = sentence.get(CoreAnnotations.TokensAnnotation.class);
+      for (int tokenIndex = 0; tokenIndex < tokens.size(); tokenIndex++) {
+        CoreLabel token = tokens.get(tokenIndex);
+        if (kbpIsPronominalMention(token)) {
+          CoreMap pronoun = ChunkAnnotationUtils.getAnnotatedChunk(tokens, tokenIndex, tokenIndex + 1,
+              annoTokenBegin, null, CoreAnnotations.TextAnnotation.class, null);
+          pronoun.set(CoreAnnotations.SentenceIndexAnnotation.class, sentenceIndex);
+          pronoun.set(CoreAnnotations.NamedEntityTagAnnotation.class, KBPRelationExtractor.NERTag.PERSON.name);
+          pronoun.set(CoreAnnotations.EntityTypeAnnotation.class, KBPRelationExtractor.NERTag.PERSON.name);
+          // set gender
+          String pronounGender = null;
+          if (pronoun.get(CoreAnnotations.TextAnnotation.class).toLowerCase().equals("she")) {
+            pronounGender = "FEMALE";
+            pronoun.set(CoreAnnotations.GenderAnnotation.class, pronounGender);
+          }
+          else if (pronoun.get(CoreAnnotations.TextAnnotation.class).toLowerCase().equals("he")) {
+            pronounGender = "MALE";
+            pronoun.set(CoreAnnotations.GenderAnnotation.class, pronounGender);
+          }
+          if (pronounGender != null) {
+            for (CoreLabel pronounToken : pronoun.get(CoreAnnotations.TokensAnnotation.class)) {
+              pronounToken.set(CoreAnnotations.GenderAnnotation.class, pronounGender);
+            }
+          }
+          sentence.get(CoreAnnotations.MentionsAnnotation.class).add(pronoun);
+          pronouns.add(pronoun);
+        }
+      }
+    }
+
+    return pronouns;
+  }
+
   @Override
   public void annotate(Annotation annotation) {
-    List<CoreMap> allMentions = new ArrayList<>();
     List<CoreMap> sentences = annotation.get(CoreAnnotations.SentencesAnnotation.class);
 
     int sentenceIndex = 0;
@@ -225,25 +271,42 @@ public class EntityMentionsAnnotator implements Annotator {
           }
         }
       }
-      if (mentions != null) {
-        allMentions.addAll(mentions);
-      }
 
       sentenceIndex++;
     }
 
     // Post-process with acronyms
-    if (doAcronyms) {
-      addAcronyms(annotation, allMentions);
-    }
+    if (doAcronyms) { addAcronyms(annotation); }
 
-    annotation.set(mentionsCoreAnnotationClass, allMentions);
+    // Post-process add in KBP pronominal mentions, (English only for now)
+    if (entityMentionsLanguage.equals(LanguageInfo.HumanLanguage.ENGLISH))
+      annotatePronominalMentions(annotation);
+
+    // build document wide entity mentions list
+    List<CoreMap> allEntityMentions = new ArrayList<>();
+    int entityMentionIndex = 0;
+    for (CoreMap sentence : annotation.get(CoreAnnotations.SentencesAnnotation.class)) {
+      for (CoreMap entityMention : sentence.get(CoreAnnotations.MentionsAnnotation.class)) {
+        entityMention.set(CoreAnnotations.EntityMentionIndexAnnotation.class, entityMentionIndex);
+        entityMention.set(CoreAnnotations.CanonicalEntityMentionIndexAnnotation.class, entityMentionIndex);
+        for (CoreLabel entityMentionToken : entityMention.get(CoreAnnotations.TokensAnnotation.class)) {
+          entityMentionToken.set(CoreAnnotations.EntityMentionIndexAnnotation.class, entityMentionIndex);
+        }
+        allEntityMentions.add(entityMention);
+        entityMentionIndex++;
+      }
+    }
+    annotation.set(mentionsCoreAnnotationClass, allEntityMentions);
   }
 
-  private void addAcronyms(Annotation ann, List<CoreMap> mentions) {
+  private void addAcronyms(Annotation ann) {
     // Find all the organizations in a document
+    List<CoreMap> allMentionsSoFar = new ArrayList<>();
+    for (CoreMap sentence : ann.get(CoreAnnotations.SentencesAnnotation.class)) {
+      allMentionsSoFar.addAll(sentence.get(CoreAnnotations.MentionsAnnotation.class));
+    }
     List<List<CoreLabel>> organizations = new ArrayList<>();
-    for (CoreMap mention : mentions) {
+    for (CoreMap mention : allMentionsSoFar) {
       if ("ORGANIZATION".equals(mention.get(nerCoreAnnotationClass))) {
         organizations.add(mention.get(CoreAnnotations.TokensAnnotation.class));
       }
@@ -253,6 +316,7 @@ public class EntityMentionsAnnotator implements Annotator {
 
     // Iterate over tokens...
     for (CoreMap sentence : ann.get(CoreAnnotations.SentencesAnnotation.class)) {
+      List<CoreMap> sentenceMentions = new ArrayList<CoreMap>();
       List<CoreLabel> tokens = sentence.get(CoreAnnotations.TokensAnnotation.class);
       Integer totalTokensOffset = sentence.get(CoreAnnotations.TokenBeginAnnotation.class);
       for (int i = 0; i < tokens.size(); ++i) {
@@ -268,8 +332,7 @@ public class EntityMentionsAnnotator implements Annotator {
               CoreMap chunk = ChunkAnnotationUtils.getAnnotatedChunk(tokens,
                   i, i + 1, totalTokensOffset, null, null, null);
               chunk.set(CoreAnnotations.NamedEntityTagAnnotation.class,"ORGANIZATION");
-              mentions.add(chunk);
-
+              sentenceMentions.add(chunk);
             }
           }
         }

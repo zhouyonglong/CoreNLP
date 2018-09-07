@@ -198,14 +198,14 @@ public class Document {
   };
 
   /**
-   * The default {@link edu.stanford.nlp.pipeline.MentionAnnotator} implementation
+   * The default {@link edu.stanford.nlp.pipeline.CorefMentionAnnotator} implementation
    */
   private static Supplier<Annotator> defaultMention = new Supplier<Annotator>() {
-    private StanfordCoreNLP.AnnotatorSignature key = new StanfordCoreNLP.AnnotatorSignature(STANFORD_MENTION,
-        PropertiesUtils.getSignature(STANFORD_MENTION, EMPTY_PROPS));
+    private StanfordCoreNLP.AnnotatorSignature key = new StanfordCoreNLP.AnnotatorSignature(STANFORD_COREF_MENTION,
+        PropertiesUtils.getSignature(STANFORD_COREF_MENTION, EMPTY_PROPS));
     @Override
     public synchronized Annotator get() {
-      return StanfordCoreNLP.GLOBAL_ANNOTATOR_CACHE.computeIfAbsent(key, (x) -> Lazy.of(() -> backend.mention(EMPTY_PROPS))).get();
+      return StanfordCoreNLP.GLOBAL_ANNOTATOR_CACHE.computeIfAbsent(key, (x) -> Lazy.of(() -> backend.corefMention(EMPTY_PROPS))).get();
     }
   };
 
@@ -486,10 +486,13 @@ public class Document {
    */
   public CoreNLPProtos.Document serialize() {
     synchronized (impl) {
-      // Serialize sentences
+      // Ensure we have sentences
+      List<Sentence> sentences = sentences();
+      // Ensure we're saving the newest sentences
+      // IMPORTANT NOTE: the clear below must come after we call #sentences()
       this.impl.clearSentence();
-      for (Sentence sent : sentences()) {
-        this.impl.addSentence(sent.serialize());
+      for (Sentence s : sentences) {
+        this.impl.addSentence(s.serialize());
       }
       // Serialize document
       return impl.build();
@@ -574,35 +577,27 @@ public class Document {
       f.apply(this.sentence(0));
     }
     try {
-      AnnotationOutputter.Options options = new AnnotationOutputter.Options();
-      options.pretty = false;
+      AnnotationOutputter.Options options = new AnnotationOutputter.Options(false);
       return new JSONOutputter().print(this.asAnnotation(), options);
     } catch (IOException e) {
       throw new RuntimeIOException(e);
     }
   }
 
-  /**
-   * <p>
-   *  Write this annotation as an XML string.
+  /** Write this annotation as an XML string.
    *  Optionally, you can also specify a number of operations to call on the document before
    *  dumping it to XML.
    *  This allows the user to ensure that certain annotations have been computed before the document
    *  is dumped.
    *  For example:
-   * </p>
+   *  <p>
+   *  {@code String xml = new Document("Lucy in the sky with diamonds").xml(Document::parse, Document::ner); }
+   *  <p>
+   *  will create a XML dump of the document, ensuring that at least the parse tree and ner tags are populated.
    *
-   * <pre>{@code
-   *   String xml = new Document("Lucy in the sky with diamonds").xml(Document::parse, Document::ner);
-   * }</pre>
-   *
-   * <p>
-   *   will create a XML dump of the document, ensuring that at least the parse tree and ner tags are populated.
-   * </p>
-   *
-   * @param functions The (possibly empty) list of annotations to populate on the document before dumping it
-   *                  to XML.
-   * @return The XML String for this document.
+   *  @param functions The (possibly empty) list of annotations to populate on the document before dumping it
+   *                   to XML.
+   *  @return The XML String for this document.
    */
   @SafeVarargs
   public final String xml(Function<Sentence, Object>... functions) {
@@ -631,8 +626,7 @@ public class Document {
       f.apply(this.sentence(0));
     }
     try {
-      AnnotationOutputter.Options options = new AnnotationOutputter.Options();
-      options.pretty = false;
+      AnnotationOutputter.Options options = new AnnotationOutputter.Options(false);
       return new XMLOutputter().print(this.asAnnotation(false), options);
     } catch (IOException e) {
       throw new RuntimeIOException(e);
@@ -671,6 +665,7 @@ public class Document {
           // (sentences)
           List<CoreMap> sentences = ann.get(CoreAnnotations.SentencesAnnotation.class);
           this.sentences = new ArrayList<>(sentences.size());
+          this.impl.clearSentence();
           for (CoreMap sentence : sentences) {
             //Sentence sent = new Sentence(this, sentence);
             Sentence sent = new Sentence(this, this.serializer.toProtoBuilder(sentence), sentence.get(CoreAnnotations.TextAnnotation.class), defaultProps);
@@ -722,7 +717,7 @@ public class Document {
           this.runDepparse(props);
         }
         // Run mention
-        Supplier<Annotator> mention = (props == EMPTY_PROPS || props == SINGLE_SENTENCE_DOCUMENT) ? defaultMention : getOrCreate(STANFORD_MENTION, props, () -> backend.mention(props));
+        Supplier<Annotator> mention = (props == EMPTY_PROPS || props == SINGLE_SENTENCE_DOCUMENT) ? defaultMention : getOrCreate(STANFORD_COREF_MENTION, props, () -> backend.corefMention(props));
         // Run coref
         Supplier<Annotator> coref = (props == EMPTY_PROPS || props == SINGLE_SENTENCE_DOCUMENT) ? defaultCoref : getOrCreate(STANFORD_COREF, props, () -> backend.coref(props));
         Annotation ann = asAnnotation(true);

@@ -466,11 +466,11 @@ public class ShiftReduceParser extends ParserGrammar implements Serializable  {
   }
 
   @Override
-  public void setOptionFlags(String ... flags) {
+  public void setOptionFlags(String... flags) {
     op.setOptions(flags);
   }
 
-  public static ShiftReduceParser loadModel(String path, String ... extraFlags) {
+  public static ShiftReduceParser loadModel(String path, String... extraFlags) {
     ShiftReduceParser parser = IOUtils.readObjectAnnouncingTimingFromURLOrClasspathOrFileSystem(
             log, "Loading parser from serialized file", path);
     if (extraFlags.length > 0) {
@@ -487,7 +487,7 @@ public class ShiftReduceParser extends ParserGrammar implements Serializable  {
     }
   }
 
-  static final String[] FORCE_TAGS = { "-forceTags" };
+  private static final String[] FORCE_TAGS = { "-forceTags" };
 
   public static void main(String[] args) {
     List<String> remainingArgs = Generics.newArrayList();

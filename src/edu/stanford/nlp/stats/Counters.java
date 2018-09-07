@@ -932,7 +932,7 @@ public class Counters  {
    * their respective value or magnitude (by absolute value). If
    * <tt>ascending</tt> is true, smaller magnitudes will be returned first,
    * otherwise higher magnitudes will be returned first.
-   * <p/>
+   * <p>
    * Sample usage:
    *
    * <pre>
@@ -1969,17 +1969,18 @@ public class Counters  {
    */
   public static ClassicCounter<String> deserializeStringCounter(String filename) throws IOException {
     String[] fields = new String[4];
-    BufferedReader reader = IOUtils.readerFromString(filename);
-    String line;
-    ClassicCounter<String> counts = new ClassicCounter<>(1000000);
-    while ( (line = reader.readLine()) != null) {
-      StringUtils.splitOnChar(fields, line, '\t');
-      long mantissa = SloppyMath.parseInt(fields[2]);
-      int exponent = (int) SloppyMath.parseInt(fields[3]);
-      double value = SloppyMath.parseDouble(fields[1].equals("-"), mantissa, exponent);
-      counts.setCount(fields[0], value);
+    try (BufferedReader reader = IOUtils.readerFromString(filename)) {
+      String line;
+      ClassicCounter<String> counts = new ClassicCounter<>(1000000);
+      while ((line = reader.readLine()) != null) {
+        StringUtils.splitOnChar(fields, line, '\t');
+        long mantissa = SloppyMath.parseInt(fields[2]);
+        int exponent = (int) SloppyMath.parseInt(fields[3]);
+        double value = SloppyMath.parseDouble(fields[1].equals("-"), mantissa, exponent);
+        counts.setCount(fields[0], value);
+      }
+      return counts;
     }
-    return counts;
   }
 
 
